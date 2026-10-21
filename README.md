@@ -40,8 +40,10 @@ Die Figur übernimmt nur die *Richtungen* deiner Arme und Beine, die Längen kom
 |---|---|
 | Ballon | +10 |
 | Goldener Ballon | +50 |
-| Gewitterwolke | −20, Combo weg |
+| Gewitterwolke berühren (nur Hände zählen) | −10, Combo weg, danach 1,5 s Schutz |
 | Combo (Treffer kurz hintereinander) | ×2 ab 4, ×3 ab 9, ×4 ab 14 |
+
+**Gewitterwolken:** Sie kommen erst nach 10 Sekunden, schauen zuerst kurz am Bildrand herein («⚡ Hände weg!») und fliegen dann vor dir durch, entweder auf Höhe der erhobenen Hände oder auf Brusthöhe. Wer die Arme rechtzeitig senkt, ist sicher. Gleichzeitig gibt es höchstens eine Wolke, gegen Schluss zwei.
 
 **Tasten auf dem TV/Laptop:** `D` Maus-Testmodus · `C` Charakter · `F` Vollbild · `M` Ton an/aus · `Leertaste`/`OK` Start
 

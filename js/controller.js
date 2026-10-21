@@ -7,7 +7,9 @@ const $ = (id) => document.getElementById(id);
 const PEER_PREFIX = 'ballonplatzer-v1-';
 const VISION = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs';
 const WASM = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm';
-const MODEL = 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task';
+// «full» ist genauer (mit Grafikchip), «lite» ist der Notnagel für schwache Handys
+const MODEL_FULL = 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task';
+const MODEL_LITE = 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task';
 // Nur diese Punkte werden gesendet: Nase, Schultern, Ellbogen, Handgelenke, Zeigefinger, Hüften, Knie, Knöchel
 const IDX = [0, 11, 12, 13, 14, 15, 16, 19, 20, 23, 24, 25, 26, 27, 28];
 const BONES = [[11, 12], [11, 13], [13, 15], [12, 14], [14, 16], [11, 23], [12, 24], [23, 24], [23, 25], [25, 27], [24, 26], [26, 28], [15, 19], [16, 20]];
@@ -94,18 +96,36 @@ async function loadModel() {
   ui.loadingText.textContent = 'KI wird geladen …';
   const { FilesetResolver, PoseLandmarker } = await import(VISION);
   const vision = await FilesetResolver.forVisionTasks(WASM);
-  const opts = (delegate) => ({
-    baseOptions: { modelAssetPath: MODEL, delegate },
+  const opts = (delegate, model) => ({
+    baseOptions: { modelAssetPath: model, delegate },
     runningMode: 'VIDEO', numPoses: 1,
     minPoseDetectionConfidence: 0.5, minPosePresenceConfidence: 0.5, minTrackingConfidence: 0.5,
   });
-  try { landmarker = await PoseLandmarker.createFromOptions(vision, opts('GPU')); }
-  catch { landmarker = await PoseLandmarker.createFromOptions(vision, opts('CPU')); }
+  try { landmarker = await PoseLandmarker.createFromOptions(vision, opts('GPU', MODEL_FULL)); }
+  catch { landmarker = await PoseLandmarker.createFromOptions(vision, opts('CPU', MODEL_LITE)); }
+  slowCheckAt = performance.now() + 4000;
   ui.loading.classList.add('done');
 }
 
 /* ---------- Erkennungsschleife ---------- */
-let lastTs = -1, fpsN = 0, fpsT = performance.now();
+let lastTs = -1, fpsN = 0, fpsT = performance.now(), slowCheckAt = Infinity, lastFps = 30;
+
+/* One-Euro-Filter: glättet Zittern bei langsamen Bewegungen, reagiert sofort bei schnellen */
+class OneEuro {
+  constructor(minCutoff = 1.4, beta = 7, dCutoff = 1.2) { Object.assign(this, { minCutoff, beta, dCutoff, x: null, dx: 0, t: 0 }); }
+  static a(cutoff, dt) { const r = 2 * Math.PI * cutoff * dt; return r / (r + 1); }
+  filter(v, t) {
+    if (this.x === null) { this.x = v; this.t = t; return v; }
+    const dt = Math.max((t - this.t) / 1000, 1e-3); this.t = t;
+    const dx = (v - this.x) / dt;
+    this.dx += OneEuro.a(this.dCutoff, dt) * (dx - this.dx);
+    const cutoff = this.minCutoff + this.beta * Math.abs(this.dx);
+    this.x += OneEuro.a(cutoff, dt) * (v - this.x);
+    return this.x;
+  }
+  reset() { this.x = null; this.dx = 0; }
+}
+const filters = IDX.map(() => [new OneEuro(), new OneEuro()]);
 const r3 = (v) => Math.round(v * 1000) / 1000;
 
 function loop() {
@@ -123,7 +143,9 @@ function loop() {
         try { res = landmarker.detectForVideo(v, ts); } catch (e) { console.warn(e); }
         handle(res);
         fpsN++;
-        if (ts - fpsT > 1000) { ui.fps.textContent = Math.round((fpsN * 1000) / (ts - fpsT)) + ' fps'; fpsN = 0; fpsT = ts; }
+        if (ts - fpsT > 1000) { lastFps = Math.round((fpsN * 1000) / (ts - fpsT)); ui.fps.textContent = lastFps + ' fps'; fpsN = 0; fpsT = ts; }
+        // Zu langsam für das genaue Modell? -> auf «lite» wechseln
+        if (ts > slowCheckAt) { slowCheckAt = Infinity; if (lastFps < 15) switchToLite(); }
       }
     }
     schedule();
@@ -140,12 +162,17 @@ function handle(res) {
   if (visible !== bodySeen) { bodySeen = !!visible; check('chkBody', bodySeen); updateMessage(); }
 
   if (lm) {
-    const k = [];
-    // Spiegeln (1 - x), damit der TV wie ein Spiegel wirkt
-    for (const i of IDX) { const p = lm[i]; k.push(r3(1 - p.x), r3(p.y), Math.round((p.visibility ?? 1) * 100) / 100); }
+    const k = [], t = performance.now();
+    // Glätten und spiegeln (1 - x), damit der TV wie ein Spiegel wirkt
+    IDX.forEach((i, n) => {
+      const p = lm[i];
+      const x = filters[n][0].filter(p.x, t), y = filters[n][1].filter(p.y, t);
+      k.push(r3(1 - x), r3(y), Math.round((p.visibility ?? 1) * 100) / 100);
+    });
     send({ t: 'p', k, w: v.videoWidth, h: v.videoHeight });
     if (previewOn) drawSkeleton(lm);
   } else if (performance.now() - lastNoneSent > 300) {
+    filters.forEach((f) => { f[0].reset(); f[1].reset(); });
     lastNoneSent = performance.now();
     send({ t: 'p', k: null });
   }
@@ -278,3 +305,15 @@ createEditor($('charEditor'), charCfg, (c) => {
   send({ t: 'char', c });
   buzz(12);
 });
+
+async function switchToLite() {
+  try {
+    const { FilesetResolver, PoseLandmarker } = await import(VISION);
+    const vision = await FilesetResolver.forVisionTasks(WASM);
+    const lite = await PoseLandmarker.createFromOptions(vision, {
+      baseOptions: { modelAssetPath: MODEL_LITE, delegate: 'GPU' }, runningMode: 'VIDEO', numPoses: 1,
+      minPoseDetectionConfidence: 0.5, minPosePresenceConfidence: 0.5, minTrackingConfidence: 0.5,
+    });
+    const old = landmarker; landmarker = lite; lastTs = -1; old.close?.();
+  } catch (e) { console.warn('Lite-Modell nicht verfügbar', e); }
+}

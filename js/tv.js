@@ -279,19 +279,31 @@ function composePose({ hx, hy, torso = { x: 0, y: 1 }, neck = null, arms, legs }
   // Arme vor dem Körper nach vorne schieben, damit sie nicht im Bauch verschwinden
   const zFor = (x, y) => (Math.abs(x - shx) < 0.46 && y < shy + 0.15 && y > hy - 0.25 ? 0.42 : 0.06);
   for (const s of ['l', 'r']) {
-    // Nach oben zeigende Arme nach aussen drehen, damit die Hände nicht hinter dem grossen Kopf verschwinden
+    // Richtung exakt übernehmen. Nur ganz senkrecht nach oben leicht öffnen,
+    // damit die Hände nicht komplett hinter dem grossen Kopf verschwinden.
     const side = s === 'l' ? -1 : 1;
     const [u, f] = arms[s].map((d) => {
       const v = nrm(d.x, d.y);
-      if (v.y <= 0) return v;
-      const ang = Math.max(Math.atan2(v.x * side, v.y), 0.95);
-      return { x: side * Math.sin(ang), y: Math.cos(ang) };
+      // 1 = Arm liegt quer zur Kamera, klein = Arm zeigt zur Kamera. Erst deutliche Verkürzung zählt,
+      // damit unterschiedliche Körperproportionen die Figur nicht verkrümmen.
+      const fs = d.f == null ? 1 : clamp(0.3 + ((d.f - 0.25) / 0.5) * 0.7, 0.3, 1);
+      if (v.y > 0) {
+        // Winkel ab senkrecht oben (0) bis waagrecht (π/2) weich nach aussen verschieben:
+        // senkrecht hoch wird zum «V», waagrecht bleibt waagrecht. So bleibt jede Bewegung sichtbar.
+        const th = clamp(Math.atan2(v.x * side, v.y), -0.4, Math.PI / 2);
+        const ang = th + 0.85 * (1 - th / (Math.PI / 2));
+        return { x: side * Math.sin(ang), y: Math.cos(ang), fs };
+      }
+      return { ...v, fs };
     });
     const sh = J[s + 'Sh'].tgt;
-    const ex = sh.x + u.x * D.upperArm, ey = sh.y + u.y * D.upperArm;
-    const hxx = ex + f.x * D.foreArm, hyy = ey + f.y * D.foreArm;
-    J[s + 'El'].tgt.set(ex, ey, zFor(ex, ey) * 0.7);
-    J[s + 'Ha'].tgt.set(hxx, hyy, zFor(hxx, hyy));
+    // Verkürzte Segmente gehen in die Tiefe (Richtung TV-Zuschauer)
+    const uz = Math.sqrt(1 - u.fs * u.fs) * D.upperArm, fz = Math.sqrt(1 - f.fs * f.fs) * D.foreArm;
+    const ex = sh.x + u.x * D.upperArm * u.fs, ey = sh.y + u.y * D.upperArm * u.fs;
+    const hxx = ex + f.x * D.foreArm * f.fs, hyy = ey + f.y * D.foreArm * f.fs;
+    const handUp = hyy > shy + 0.35 && Math.abs(hxx - shx) < 0.75; // Hand vor dem Gesicht
+    J[s + 'El'].tgt.set(ex, ey, Math.max(zFor(ex, ey) * 0.7, uz));
+    J[s + 'Ha'].tgt.set(hxx, hyy, Math.max(zFor(hxx, hyy), uz + fz, handUp ? 0.95 : 0));
     const [lu, lf] = legs[s].map((d) => nrm(d.x, d.y));
     const hp = J[s + 'Hip'].tgt;
     const kx = hp.x + lu.x * D.thigh, ky = hp.y + lu.y * D.thigh;
@@ -380,10 +392,12 @@ function applyPose(k, w, h) {
   const d = pose.d;
   for (const s of ['l', 'r']) {
     const S = P[s + 'Sh'], E = P[s + 'El'], W = P[s + 'Wr'], I = P[s + 'Ix'];
-    if (ok(E, 0.3)) d[s + 'U'] = dir(S, E);
+    // Länge im Bild vs. erwartete Länge -> wie stark zeigt der Arm zur Kamera?
+    const fore = (v, ratio) => Math.hypot(v.x, v.y) / (ratio * pose.torso);
+    if (ok(E, 0.3)) { const v = dir(S, E); d[s + 'U'] = { ...v, f: fore(v, 0.6) }; }
     if (ok(E, 0.3) && ok(W, 0.3)) {
       const hand = ok(I, 0.3) ? { x: W.x + (I.x - W.x) * 0.6, y: W.y + (I.y - W.y) * 0.6 } : W;
-      d[s + 'F'] = dir(E, hand);
+      const v = dir(E, hand); d[s + 'F'] = { ...v, f: fore(v, 0.62) };
     }
     const Hp = hipsOk ? P[s + 'Hip'] : null, K = P[s + 'Kn'], A = P[s + 'An'];
     const def = s === 'l' ? LEG_L : LEG_R;
@@ -500,16 +514,28 @@ class StormCloud {
     this.bolt.position.set(0, -0.32, 0.05); this.g.add(this.bolt);
     scene.add(this.g); this.g.visible = false; this.active = false;
   }
-  spawn(fromLeft, y, speed) {
+  // Die Wolke schaut zuerst am Bildrand herein (Vorwarnung) und fliegt erst dann los
+  spawn(fromLeft, y, speed, z = 0.2, edge = 6.2) {
     this.dir = fromLeft ? 1 : -1;
-    this.g.position.set(fromLeft ? -7.5 : 7.5, y, rand(-0.2, 0.2));
-    this.baseY = y; this.speed = speed; this.age = 0;
+    this.g.position.set(fromLeft ? -edge : edge, y, z);
+    this.baseY = y; this.speed = speed; this.age = 0; this.warn = 1.3;
+    this.g.scale.setScalar(0.01);
     this.g.visible = true; this.active = true;
   }
+  get dangerous() { return this.warn <= 0; }
   get x() { return this.g.position.x; }
   get y() { return this.g.position.y; }
   update(dt) {
     this.age += dt;
+    if (this.warn > 0) {
+      this.warn -= dt;
+      const t = 1 - this.warn / 1.3;
+      this.g.scale.setScalar(Math.min(1, t * 2.2) * (1 + Math.sin(this.age * 22) * 0.06));
+      this.g.position.y = this.baseY;
+      this.bolt.visible = Math.sin(this.age * 18) > 0;
+      return;
+    }
+    this.g.scale.setScalar(1);
     this.g.position.x += this.dir * this.speed * dt;
     this.g.position.y = this.baseY + Math.sin(this.age * 2.4) * 0.15;
     this.g.rotation.z = Math.sin(this.age * 3) * 0.06;
@@ -677,7 +703,7 @@ function setState(s) {
 }
 
 function resetGame() {
-  Object.assign(game, { score: 0, time: GAME_TIME, popped: 0, combo: 0, bestCombo: 0, lastHit: -9, mult: 1, spawnT: 0.4, cloudT: rand(5, 8) });
+  Object.assign(game, { score: 0, time: GAME_TIME, popped: 0, combo: 0, bestCombo: 0, lastHit: -9, mult: 1, spawnT: 0.4, cloudT: rand(10, 12), safeUntil: 0, cloudHits: 0 });
   for (const b of balloonPool) if (!b.ambient) b.hide();
   for (const c of clouds2) c.hide();
   ui.score.textContent = '0'; ui.combo.textContent = '×1'; ui.time.textContent = GAME_TIME;
@@ -726,12 +752,14 @@ function hitBalloon(b, side) {
 
 function hitCloud(c) {
   c.hide();
-  game.score = Math.max(0, game.score - 20);
+  game.safeUntil = now + 1.5; // kurz unverwundbar nach einem Treffer
+  game.cloudHits = (game.cloudHits || 0) + 1;
+  game.score = Math.max(0, game.score - 10);
   game.combo = 0; game.mult = 1;
   ui.score.textContent = game.score; ui.combo.textContent = '×1';
   const pos = c.g.position.clone();
   burst(pos, ['#8b86a8', '#a9a4c4', '#6f6a8c', '#ffd84d'], 40, 3.5, 1.4);
-  popupAt(pos, '−20', '#6f6a8c');
+  popupAt(pos, '−10', '#6f6a8c');
   audio.bad();
   shakeAmt = 0.35; avatar.shake = 1;
   const f = $('flash'); f.classList.remove('on'); void f.offsetWidth; f.classList.add('on');
@@ -766,10 +794,17 @@ function updatePlay(dt, realDt = dt) {
     let x = clamp(center + (Math.random() + Math.random() - 1) * 3.2, -SPAWN_X, SPAWN_X);
     getBalloon().spawn({ x, speed: lerp(0.95, 1.6, progress) * rand(0.85, 1.15) * (gold ? 1.35 : 1), kind: gold ? 'gold' : 'normal' });
   }
+  // Gewitterwolken: erst nach 10 s, höchstens 1 (gegen Ende 2) gleichzeitig.
   game.cloudT -= dt;
-  if (game.cloudT <= 0) {
-    game.cloudT = lerp(7, 3.2, progress) * rand(0.8, 1.2);
-    getCloud().spawn(Math.random() < 0.5, HIP_Y + rand(0.5, 2.3), rand(1.2, 1.9) + progress);
+  const nClouds = clouds2.filter((c) => c.active).length;
+  if (game.cloudT <= 0 && nClouds < (progress > 0.7 ? 2 : 1)) {
+    game.cloudT = lerp(8, 4.5, progress) * rand(0.85, 1.2);
+    // Zwei Bahnen vor der Figur: Höhe erhobene Hände oder Brusthöhe. Arme unten = sicher.
+    const shY = (avatar.J.lSh.cur.y + avatar.J.rSh.cur.y) / 2;
+    const y = Math.random() < 0.55 ? shY + rand(0.65, 0.8) : shY + rand(-0.1, 0.05);
+    const fromLeft = Math.random() < 0.5;
+    getCloud().spawn(fromLeft, y, rand(0.9, 1.3) + progress * 0.5, 1.1);
+    popupAt(new THREE.Vector3(fromLeft ? -4.6 : 4.6, y + 0.7, 1.1), '⚡ Hände weg!', '#6f6a8c');
   }
 
   // Treffer prüfen
@@ -790,13 +825,11 @@ function updatePlay(dt, realDt = dt) {
     if (!c.active) continue;
     c.update(dt);
     if (Math.abs(c.x) > 8) { c.hide(); continue; }
+    if (!c.dangerous || now < game.safeUntil) continue;
+    // Nur die Hände zählen («Finger weg!»), mit kleinerem Trefferradius als bei Ballonen
     for (const s of ['l', 'r']) {
       const h = J[s + 'Ha'].cur, p = prevHand[s];
-      if (segDist(c.x, c.y, p.x, p.y, h.x, h.y) < 0.48 + HAND_R) { hitCloud(c); break; }
-    }
-    if (c.active) {
-      const head = J.head.cur;
-      if (Math.hypot(c.x - head.x, c.y - head.y) < 1.15) hitCloud(c);
+      if (segDist(c.x, c.y, p.x, p.y, h.x, h.y) < 0.36 + 0.12) { hitCloud(c); break; }
     }
   }
   if (game.time <= 0) setState('results');
@@ -1104,4 +1137,4 @@ if (params.has('demo')) setDemo(true);
 tick();
 
 // Test-Hilfe (Konsole): window.__bp.applyPose(...)
-window.__bp = { applyPose, get state() { return state; }, setState, game, avatar };
+window.__bp = { applyPose, get state() { return state; }, setState, game, avatar, clouds: clouds2 };

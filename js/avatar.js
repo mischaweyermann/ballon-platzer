@@ -100,7 +100,7 @@ export class Avatar {
     this.beardG = new THREE.Group(); this.head.add(this.beardG);
 
     this.blinkAt = 2; this.blink = 0; this.happy = 0; this.shake = 0; this.hop = 0;
-    this.follow = 18;
+    this.follow = 28; // Handy filtert bereits, daher hier wenig Verzögerung
     this.cfg = null;
     this.setConfig(DEFAULT_CONFIG);
   }
